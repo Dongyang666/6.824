@@ -18,8 +18,7 @@ package raft
 //
 
 import (
-	"fmt"
-	"log"
+	"encoding/json"
 	"math/rand"
 	"time"
 
@@ -201,12 +200,13 @@ func (rf *Raft) commitLog() {
 				count += 1
 			}
 		}
-		if count >= len(rf.peers)>>1 {
+		if count > (len(rf.peers) >> 1) {
 			rf.commitIndex = n
 			commit = true
 		}
 	}
 	if commit {
+
 		rf.commitCh <- true
 	}
 }
@@ -216,7 +216,6 @@ func (rf *Raft) appendEntries2Follower() {
 	defer rf.mu.Unlock()
 
 	rf.commitLog()
-
 	var reply AppendEntriesReply
 	for i := range rf.peers {
 		if i != rf.me && rf.state == LEADER {
@@ -234,8 +233,13 @@ func (rf *Raft) appendEntries2Follower() {
 	}
 }
 
+func ToJson(arg interface{}) string {
+	marshal, _ := json.Marshal(arg)
+	return string(marshal)
+}
 func (rf *Raft) sendAppendEntries(server int, args AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	//fmt.Println("server", rf.me, "send to",server," sendAppendEntries,req", ToJson(args), "resp", ToJson(reply))
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if ok && rf.state == LEADER {
@@ -303,6 +307,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 		}
 		rf.commitCh <- true
 	}
+	//fmt.Println("server", rf.me, "log info", rf.log)
 }
 
 func (rf *Raft) decreaseNextIndex(prevLogIndex int) int {
@@ -332,14 +337,18 @@ func (rf *Raft) becameFollower(term int) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	isLeader := rf.state == LEADER
-
 	if isLeader {
+		//fmt.Println("server", rf.me, "get command:", command)
 		var logEntry LogEntry
 		logEntry.Term = rf.currentTerm
 		logEntry.Command = command
 		logEntry.Index = rf.getLastIndex() + 1
+		term = rf.currentTerm
 		rf.log = append(rf.log, logEntry)
+		//fmt.Println("server:", rf.me, "get command:", command, "this server's log:", rf.log)
 		index = logEntry.Index
 	}
 	return index, term, isLeader
@@ -365,8 +374,9 @@ func (rf *Raft) ticker() {
 			// 1. get leader heartbeat 2.timeout start election
 			select {
 			case <-rf.heartbeatChan:
-				//log.Println(fmt.Sprintf("%v,get heartbeat", rf.me))
+				//fmt.Println(fmt.Sprintf("%v,get heartbeat", rf.me))
 			case <-time.After(time.Duration(rand.Intn(150)+150) * time.Millisecond):
+				//fmt.Println("server", rf.me, "not get heartbeat and became CANDIDATE")
 				rf.mu.Lock()
 				rf.state = CANDIDATE
 				rf.mu.Unlock()
@@ -375,22 +385,22 @@ func (rf *Raft) ticker() {
 			rf.startElection()
 			select {
 			case <-rf.heartbeatChan:
+				//fmt.Println("server", rf.me, "get heartbeatChan")
 				rf.mu.Lock()
 				rf.state = FOLLOWER
 				rf.mu.Unlock()
 			case isLeader := <-rf.leaderChan:
 				// init nextIndex
-
 				if isLeader {
-					//log.Println(fmt.Sprintf("server : %v,start to heartbeat",rf.me))
+					//fmt.Println(fmt.Sprintf("server : %v,start to heartbeat", rf.me))
 					rf.initNextIndex()
 					rf.appendEntries2Follower()
 				}
 			case <-time.After(time.Duration(rand.Intn(150)+150) * time.Millisecond):
-				//log.Println(fmt.Sprintf("candidate: %v time-out ",rf.me))
+				//fmt.Println(fmt.Sprintf("candidate: %v time-out ", rf.me))
 			}
 		case LEADER:
-			//log.Println(fmt.Sprintf("current leader:%v", rf.me))
+			//fmt.Println("server", rf.me, "is leader start appendEntries2Follower")
 			time.Sleep(time.Millisecond * 50)
 			rf.appendEntries2Follower()
 		}
@@ -403,6 +413,7 @@ func (rf *Raft) initNextIndex() {
 	defer rf.mu.Unlock()
 	for server := range rf.nextIndex {
 		rf.nextIndex[server] = rf.getLastIndex() + 1
+		rf.matchIndex[server] = 0
 	}
 }
 
@@ -415,6 +426,8 @@ func (rf *Raft) apply(applyCh chan ApplyMsg) {
 				var msg ApplyMsg
 				msg.CommandIndex = i
 				msg.Command = rf.log[i].Command
+				msg.CommandValid = true
+				//fmt.Println("server",rf.me,"send to apply req:",ToJson(msg))
 				applyCh <- msg
 				rf.lastApplied = i
 			}
@@ -463,7 +476,7 @@ func (rf *Raft) sendElection2Other() {
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me && rf.state == CANDIDATE {
 			go func(server int, args RequestVoteArgs, reply RequestVoteReply) {
-				//log.Println(fmt.Sprintf("server start election: %v,send to server:%v", rf.me, server))
+				//fmt.Println(fmt.Sprintf("server start election: %v,send to server:%v", rf.me, server))
 				rf.sendRequestVote(server, args, &reply)
 			}(i, args, reply)
 		}
@@ -476,10 +489,10 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 	defer rf.mu.Unlock()
 	if ok {
 		if reply.VoteGranted && rf.state == CANDIDATE {
-			//log.Println(fmt.Sprintf("candidate:%v,server repy true:%v", rf.me, server))
+			//fmt.Println(fmt.Sprintf("candidate:%v,server repy true:%v", rf.me, server))
 			rf.voteCount++
 			if rf.voteCount > len(rf.peers)>>1 {
-				log.Println(fmt.Sprintf("leader has been elected : [%v]", rf.me))
+				//fmt.Println(fmt.Sprintf("leader has been elected : [%v]", rf.me))
 				rf.state = LEADER
 				rf.leaderChan <- true
 			}
@@ -517,12 +530,12 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	checkLog := rf.checkLog(args.LastLogIndex, args.LastTermIndex)
 	if (rf.votedFor == -1 || rf.votedFor == args.CandidateId) && checkLog {
-		//log.Println(fmt.Sprintf("server:%v set votedFor:%v", rf.me, args.CandidateId))
+		//fmt.Println(fmt.Sprintf("server:%v set votedFor:%v", rf.me, args.CandidateId))
 		reply.VoteGranted = true
 		rf.votedFor = args.CandidateId
 		reply.Term = rf.currentTerm
 	} else {
-		//log.Println(fmt.Sprintf("server:%v return false :%v", rf.me, args.CandidateId))
+		//fmt.Println(fmt.Sprintf("server:%v return false :%v", rf.me, args.CandidateId))
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 	}
@@ -539,8 +552,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = -1
 	rf.heartbeatChan = make(chan bool, MAXSERVERCOUNT)
 	rf.leaderChan = make(chan bool, MAXSERVERCOUNT)
+	rf.commitCh = make(chan bool, MAXSERVERCOUNT)
 	rf.matchIndex = make([]int, len(peers))
 	rf.nextIndex = make([]int, len(peers))
+	rf.currentTerm = 1
+	// 先写进去一个
 	rf.log = append(rf.log, LogEntry{})
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())

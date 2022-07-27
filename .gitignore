@@ -2,3 +2,8 @@ pkg/
 api.key
 .api.key.trimmed
 *-handin.tar.gz
+*.iml
+modules.xml
+protoeditor.xml
+vcs.xml
+.idea
